@@ -1,0 +1,27 @@
+[hotkeys]
+# Key names: f1–f12, or single characters like "a"
+activation    = "f7"   # toggle voice mode on/off
+push_to_talk  = "f8"   # hold to record, release to process
+
+[whisper]
+model        = "base.en"
+compute_type = "int8"   # int8 is fastest on CPU; use float16 if on GPU
+beam_size    = 1        # greedy decoding — fastest, small accuracy trade-off
+vad_filter   = true     # skip silent regions before transcribing
+
+[ollama]
+model            = "llama3.2:1b"
+timeout_seconds  = 15.0
+cleanup_enabled  = true   # set false to skip LLM and paste raw Whisper output
+
+[recording]
+max_seconds = 30.0    # auto-stop recording after this many seconds
+min_seconds = 0.3     # ignore recordings shorter than this
+mic_device  = ""      # leave empty for system default; use integer index to select
+
+[session]
+idle_unload_seconds = 300.0   # unload models after this many idle seconds (0 = never)
+
+[clipboard]
+restore             = true    # restore previous clipboard contents after paste
+restore_delay_seconds = 1.5   # how long to wait before restoring
