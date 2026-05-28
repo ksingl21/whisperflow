@@ -1,26 +1,29 @@
 # WhisperFlow
 
-WhisperFlow is a lightweight, purely local, push-to-talk voice-to-text daemon. It's designed for ultra-low latency, allowing you to record spoken English and have it instantly transcribed, cleaned up by a local LLM, and pasted into your active cursor.
+WhisperFlow is a lightweight, purely local voice-to-text app for macOS. Speak, and your words are instantly transcribed, cleaned up by a local LLM, and pasted into your active application — no cloud, no latency.
 
 ## Features
 
-- **Push-to-Talk:** Record audio only while holding a hotkey (default: `F8`).
-- **Local Transcription:** Uses `faster-whisper` for fast, private, on-device transcription.
-- **LLM Cleanup:** Optional integration with Ollama to remove filler words and fix transcription errors.
-- **Auto-Paste:** Automatically pastes the final text into your active application.
-- **Efficient:** Models are loaded on demand and can be unloaded after a period of inactivity.
+- **Global hotkeys:** Activate and record from any app without switching windows.
+- **Toggle recording:** Press Space to start, and it auto-stops after 2 seconds of silence.
+- **Local transcription:** Uses `faster-whisper` for fast, private, on-device transcription.
+- **LLM cleanup:** Optional Ollama integration removes filler words and fixes transcription errors.
+- **Auto-paste:** Transcribed text is pasted directly into your active application.
+- **macOS notifications:** Get notified when the app is ready, recording completes, and text is pasted.
+- **Memory efficient:** Models load on demand and unload automatically after 5 minutes of inactivity.
 
 ## Prerequisites
 
+- macOS
 - Python 3.10+
 - [Ollama](https://ollama.com/) (optional, for LLM cleanup)
-- PortAudio (for `sounddevice`)
+- PortAudio — install via Homebrew: `brew install portaudio`
 
 ## Installation
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/whisperflow.git
+   git clone https://github.com/ksingl21/whisperflow.git
    cd whisperflow
    ```
 
@@ -31,25 +34,83 @@ WhisperFlow is a lightweight, purely local, push-to-talk voice-to-text daemon. I
    pip install -r requirements.txt
    ```
 
-3. (Optional) Pull the Ollama model:
+3. Pull the Ollama model (optional but recommended):
    ```bash
    ollama pull llama3.2:1b
    ```
 
-## Configuration
+## Launching the App
 
-Edit `config.toml` to customize hotkeys, models, and other settings.
+### Option 1 — macOS App Bundle (recommended)
+
+Double-click `WhisperFlow.app` in the project folder, or move it to your Applications folder first:
+
+```bash
+cp -r WhisperFlow.app /Applications/
+```
+
+Then double-click it from Spotlight or Applications. No terminal needed.
+
+### Option 2 — Terminal
+
+```bash
+./launch.sh
+```
+
+## Permissions (first run only)
+
+macOS requires two permissions before WhisperFlow can work:
+
+1. **Accessibility** — needed to listen for global hotkeys.
+   System Settings → Privacy & Security → Accessibility → add `WhisperFlow`
+
+2. **Microphone** — needed to record audio.
+   System Settings → Privacy & Security → Microphone → add `WhisperFlow`
+
+After granting permissions, relaunch the app.
 
 ## Usage
 
-Run the daemon:
-```bash
-python3 src/app.py
-```
+| Action | Hotkey |
+|--------|--------|
+| Toggle voice mode on/off | **Shift + V** |
+| Start recording | **Space** |
+| Stop recording (manual) | **Space** again |
+| Auto-stop | After **2 seconds of silence** |
+| Quit | **Ctrl + C** (terminal) or quit the app |
 
-- Press `F7` to activate voice mode.
-- Hold `F8` to record.
-- Release `F8` to transcribe and paste.
+**Workflow:**
+1. Launch `WhisperFlow.app` — a notification confirms it's running.
+2. Switch focus to any app where you want to type (browser, notes, editor, etc.).
+3. Press **Shift + V** to activate voice mode — Whisper loads and a notification appears.
+4. Press **Space** to start recording and speak naturally.
+5. Stop speaking — after 2 seconds of silence the recording stops automatically, transcribes, and pastes the text into your active app.
+
+## Configuration
+
+Edit `config.toml` to customise behaviour:
+
+```toml
+[hotkeys]
+activation    = "shift+v"   # toggle voice mode on/off
+push_to_talk  = "space"     # start/stop recording
+
+[whisper]
+model        = "base.en"    # whisper model size (tiny.en, base.en, small.en, medium.en)
+compute_type = "int8"       # int8 (CPU) or float16 (GPU)
+
+[ollama]
+model            = "llama3.2:1b"
+cleanup_enabled  = true     # set false to skip LLM and paste raw Whisper output
+
+[recording]
+max_seconds             = 0.0   # hard time limit in seconds (0 = disabled)
+min_seconds             = 0.3   # ignore recordings shorter than this
+silence_timeout_seconds = 2.0   # auto-stop after this many seconds of silence
+
+[session]
+idle_unload_seconds = 300.0     # unload models after this many idle seconds (0 = never)
+```
 
 ## License
 
