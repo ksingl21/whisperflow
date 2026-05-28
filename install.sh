@@ -25,9 +25,11 @@ fi
 
 # ── 3. Pull Ollama model if Ollama is available ───────────────────────────── #
 if command -v ollama &>/dev/null; then
-    MODEL=$(grep 'model' "$APPDATA/config.toml" | head -1 | awk -F'"' '{print $2}')
-    echo "→ Pulling Ollama model: $MODEL"
-    ollama pull "$MODEL" || echo "  (Ollama pull failed — you can run it manually later)"
+    MODEL=$(awk '/^\[ollama\]/{f=1} f && /^model/{print; exit}' "$APPDATA/config.toml" | awk -F'"' '{print $2}')
+    if [ -n "$MODEL" ]; then
+        echo "→ Pulling Ollama model: $MODEL"
+        ollama pull "$MODEL" || echo "  (Ollama pull failed — you can run it manually later)"
+    fi
 fi
 
 # ── 4. Build and sign WhisperFlow.app ─────────────────────────────────────── #
