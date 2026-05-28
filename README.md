@@ -27,35 +27,16 @@ WhisperFlow is a lightweight, purely local voice-to-text app for macOS. Speak, a
    cd whisperflow
    ```
 
-2. Create a virtual environment and install dependencies:
+2. Run the installer — this sets up the venv, installs dependencies, and copies `WhisperFlow.app` to `/Applications`:
    ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install -r requirements.txt
+   ./install.sh
    ```
 
-3. Pull the Ollama model (optional but recommended):
-   ```bash
-   ollama pull llama3.2:1b
-   ```
+   The installer takes a few minutes the first time (downloading Python packages and the Whisper model).
 
 ## Launching the App
 
-### Option 1 — macOS App Bundle (recommended)
-
-Double-click `WhisperFlow.app` in the project folder, or move it to your Applications folder first:
-
-```bash
-cp -r WhisperFlow.app /Applications/
-```
-
-Then double-click it from Spotlight or Applications. No terminal needed.
-
-### Option 2 — Terminal
-
-```bash
-./launch.sh
-```
+Open `WhisperFlow` from Spotlight (`Cmd+Space`, type WhisperFlow) or from `/Applications`. No terminal needed.
 
 ## Permissions (first run only)
 
@@ -68,6 +49,14 @@ macOS requires two permissions before WhisperFlow can work:
    System Settings → Privacy & Security → Microphone → add `WhisperFlow`
 
 After granting permissions, relaunch the app.
+
+## Updating
+
+To update after pulling new changes:
+```bash
+git pull
+./install.sh
+```
 
 ## Usage
 

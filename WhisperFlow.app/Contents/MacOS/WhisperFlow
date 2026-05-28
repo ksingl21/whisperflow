@@ -1,6 +1,18 @@
 #!/bin/bash
-# Resolve project root (three levels up from MacOS/)
-PROJECT="$(cd "$(dirname "$0")/../../.." && pwd)"
-cd "$PROJECT"
-source venv/bin/activate
-exec python src/app.py
+APPDATA="$HOME/Library/Application Support/WhisperFlow"
+LOG="$APPDATA/whisperflow.log"
+exec > "$LOG" 2>&1
+
+if [ ! -d "$APPDATA" ]; then
+    osascript -e 'display alert "WhisperFlow not installed" message "Please run install.sh from the project folder first." as critical'
+    exit 1
+fi
+
+PYTHON="$APPDATA/venv/bin/python"
+if [ ! -x "$PYTHON" ]; then
+    osascript -e 'display alert "WhisperFlow setup incomplete" message "Virtual environment not found. Please run install.sh again." as critical'
+    exit 1
+fi
+
+cd "$APPDATA"
+exec "$PYTHON" src/app.py
