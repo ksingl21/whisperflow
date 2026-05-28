@@ -3,14 +3,15 @@ set -e
 
 APPDATA="$HOME/Library/Application Support/WhisperFlow"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+APP="$SCRIPT_DIR/WhisperFlow.app"
 
 echo "=== WhisperFlow Installer ==="
 
 # ── 1. Copy runtime files ─────────────────────────────────────────────────── #
 echo "→ Installing app data to $APPDATA"
 mkdir -p "$APPDATA"
-cp -r "$SCRIPT_DIR/src"          "$APPDATA/"
-cp    "$SCRIPT_DIR/config.toml"  "$APPDATA/"
+cp -r "$SCRIPT_DIR/src"              "$APPDATA/"
+cp    "$SCRIPT_DIR/config.toml"      "$APPDATA/"
 cp    "$SCRIPT_DIR/requirements.txt" "$APPDATA/"
 
 # ── 2. Create venv and install dependencies ───────────────────────────────── #
@@ -32,13 +33,26 @@ if command -v ollama &>/dev/null; then
     fi
 fi
 
-# ── 4. Build and sign WhisperFlow.app ─────────────────────────────────────── #
-APP="$SCRIPT_DIR/WhisperFlow.app"
+# ── 4. Compile native binary launcher (no terminal window) ───────────────── #
+echo "→ Compiling native launcher..."
+LAUNCHER="$APP/Contents/MacOS/WhisperFlow"
+cc -Os -o "$LAUNCHER" "$SCRIPT_DIR/launcher.c" 2>/dev/null \
+    && echo "  Compiled OK" \
+    || echo "  (cc not found — keeping shell script launcher)"
+
+# ── 5. Generate app icon ──────────────────────────────────────────────────── #
+echo "→ Generating app icon..."
+ICON_OUT="$APP/Contents/Resources/AppIcon.icns"
+mkdir -p "$APP/Contents/Resources"
+"$APPDATA/venv/bin/python" "$SCRIPT_DIR/scripts/make_icon.py" "$ICON_OUT" \
+    && echo "  Icon OK" \
+    || echo "  (Icon generation failed — app will use default icon)"
+
+# ── 6. Sign and install to /Applications ─────────────────────────────────── #
 echo "→ Signing app bundle..."
 xattr -cr "$APP" 2>/dev/null || true
 codesign --force --deep --sign - "$APP" 2>/dev/null
 
-# ── 5. Install to /Applications ───────────────────────────────────────────── #
 echo "→ Copying WhisperFlow.app to /Applications..."
 rm -rf /Applications/WhisperFlow.app
 cp -r "$APP" /Applications/WhisperFlow.app
