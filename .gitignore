@@ -127,3 +127,4 @@ dmypy.json
 
 # MacOS
 .DS_Store
+WhisperFlow.app/Contents/_CodeSignature/
