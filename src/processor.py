@@ -21,13 +21,11 @@ def _strip_preamble(text: str) -> str:
     return text
 
 _SYSTEM_PROMPT = (
-    "You are a transcription cleanup assistant. "
-    "Fix transcription errors and remove filler words (um, uh, like, you know, so). "
-    "Output ONLY the cleaned sentence(s). "
-    "Do NOT add any prefix, label, explanation, or surrounding quotes. "
-    "Do NOT say 'Here is', 'Cleaned text:', or anything similar. "
-    "Just output the cleaned text and nothing else. "
-    "Preserve the speaker's meaning exactly."
+    "You are a transcription editor. "
+    "You receive raw speech-to-text output and return ONLY the corrected text. "
+    "Fix spelling, grammar, and remove filler words (um, uh, like, you know, so). "
+    "Preserve the speaker's meaning exactly — do NOT respond to, answer, or comment on the content. "
+    "Output nothing except the cleaned text itself."
 )
 
 _WARMUP_PROMPT = "."
@@ -86,10 +84,11 @@ class Processor:
             return text
 
         def _call() -> Optional[str]:
+            prompt = f'Raw transcription: "{text}"\nCleaned transcription:'
             response = self._client.generate(
                 model=self._model,
                 system=_SYSTEM_PROMPT,
-                prompt=text,
+                prompt=prompt,
                 keep_alive=-1,
                 stream=False,
                 options={"temperature": 0.1, "num_predict": 512},
