@@ -15,13 +15,15 @@ class AudioRecorder:
     def __init__(
         self,
         device: Optional[int] = None,
-        max_seconds: float = 30.0,
+        max_seconds: float = 0.0,
         min_seconds: float = 0.3,
+        silence_timeout: float = 2.0,
         on_max_duration: Optional[Callable[[Optional[np.ndarray]], None]] = None,
     ):
         self._device = device
         self._max_seconds = max_seconds
         self._min_seconds = min_seconds
+        self._silence_timeout = silence_timeout
         self._on_max_duration = on_max_duration
 
         self._chunks: list[np.ndarray] = []
@@ -29,6 +31,7 @@ class AudioRecorder:
         self._stream: Optional[sd.InputStream] = None
         self._recording = False
         self._timer: Optional[threading.Timer] = None
+        self._silence_timer: Optional[threading.Timer] = None
 
     @property
     def is_recording(self) -> bool:
@@ -63,6 +66,9 @@ class AudioRecorder:
             self._timer.daemon = True
             self._timer.start()
 
+        if self._silence_timeout > 0:
+            self._reset_silence_timer()
+
     def stop(self) -> Optional[np.ndarray]:
         if not self._recording:
             return None
@@ -79,12 +85,30 @@ class AudioRecorder:
         if self._on_max_duration:
             self._on_max_duration(audio)
 
+    def _reset_silence_timer(self) -> None:
+        if self._silence_timer:
+            self._silence_timer.cancel()
+        self._silence_timer = threading.Timer(self._silence_timeout, self._hit_silence)
+        self._silence_timer.daemon = True
+        self._silence_timer.start()
+
+    def _hit_silence(self) -> None:
+        if self._recording:
+            print("\n[whisperflow] Silence detected — stopping recording.", flush=True)
+            audio = self._finalize()
+            if self._on_max_duration:
+                self._on_max_duration(audio)
+
     def _finalize(self) -> Optional[np.ndarray]:
         self._recording = False
 
         if self._timer:
             self._timer.cancel()
             self._timer = None
+
+        if self._silence_timer:
+            self._silence_timer.cancel()
+            self._silence_timer = None
 
         if self._stream:
             try:
@@ -128,3 +152,5 @@ class AudioRecorder:
         if self._recording:
             with self._lock:
                 self._chunks.append(indata.copy())
+            if self._silence_timeout > 0 and np.max(np.abs(indata)) >= SILENCE_THRESHOLD:
+                self._reset_silence_timer()

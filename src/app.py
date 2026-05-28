@@ -2,13 +2,14 @@
 WhisperFlow — local push-to-talk voice-to-text daemon.
 
 Hotkeys (configurable in config.toml):
-  F7           : toggle voice mode on / off
-  F8 (hold)    : record while held, transcribe + paste on release
+  Shift+V      : toggle voice mode on / off
+  Space (hold) : record while held, transcribe + paste on release
   Ctrl+C       : quit
 """
 
 import gc
 import signal
+import subprocess
 import sys
 import threading
 import tomllib
@@ -17,6 +18,15 @@ from pathlib import Path
 from typing import Optional
 
 from pynput import keyboard as kb
+
+
+def _notify(title: str, body: str = "") -> None:
+    try:
+        script = f'display notification "{body}" with title "{title}"'
+        subprocess.run(["osascript", "-e", script], check=False, timeout=3,
+                       capture_output=True)
+    except Exception:
+        pass
 
 from audio import AudioRecorder
 from clipboard import ClipboardPaster
@@ -44,14 +54,56 @@ class State(Enum):
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+_MODIFIER_GROUPS = {
+    "shift": frozenset({kb.Key.shift, kb.Key.shift_l, kb.Key.shift_r}),
+    "ctrl":  frozenset({kb.Key.ctrl,  kb.Key.ctrl_l,  kb.Key.ctrl_r}),
+    "alt":   frozenset({kb.Key.alt,   kb.Key.alt_l,   kb.Key.alt_r}),
+    "cmd":   frozenset({kb.Key.cmd,   kb.Key.cmd_l,   kb.Key.cmd_r}),
+}
+
+
 def _parse_key(s: str):
-    """Convert config string ('f7', 'f8', 'a') to a pynput Key or KeyCode."""
+    """Convert a simple key name ('f7', 'space', 'a') to a pynput Key or KeyCode."""
     s = s.strip().lower()
     if hasattr(kb.Key, s):
         return getattr(kb.Key, s)
     if len(s) == 1:
         return kb.KeyCode.from_char(s)
     raise ValueError(f"Unknown hotkey in config: {s!r}")
+
+
+def _parse_hotkey(s: str) -> tuple:
+    """Parse 'shift+v', 'space', 'f7' etc.
+
+    Returns (modifier_groups: list[frozenset], main_key).
+    Each group requires at least one of its keys to be held simultaneously.
+    """
+    parts = [p.strip().lower() for p in s.split("+")]
+    modifier_groups: list = []
+    main_key = None
+    for part in parts:
+        if part in _MODIFIER_GROUPS:
+            modifier_groups.append(_MODIFIER_GROUPS[part])
+        else:
+            main_key = _parse_key(part)
+    if main_key is None:
+        raise ValueError(f"No main key found in hotkey: {s!r}")
+    return modifier_groups, main_key
+
+
+def _mods_satisfied(modifier_groups: list, held: set) -> bool:
+    """True when at least one key from each required modifier group is held."""
+    return all(any(mod in held for mod in group) for group in modifier_groups)
+
+
+def _key_matches(pressed: object, target: object) -> bool:
+    """True if pressed matches target, case-insensitively for KeyCode chars."""
+    if pressed == target:
+        return True
+    if (isinstance(pressed, kb.KeyCode) and isinstance(target, kb.KeyCode)
+            and pressed.char and target.char):
+        return pressed.char.lower() == target.char.lower()
+    return False
 
 
 def _load_config(path: Path) -> dict:
@@ -82,16 +134,14 @@ class VoiceSession:
         sess = config.get("session",   {})
         cl   = config.get("clipboard", {})
 
-        self._activation_key = _parse_key(hk.get("activation",   "f7"))
-        self._ptt_key        = _parse_key(hk.get("push_to_talk", "f8"))
-
         mic_raw = rec.get("mic_device", "")
         mic_device = int(mic_raw) if str(mic_raw).strip().isdigit() else None
 
         self._recorder = AudioRecorder(
             device=mic_device,
-            max_seconds=float(rec.get("max_seconds", 30.0)),
+            max_seconds=float(rec.get("max_seconds", 0.0)),
             min_seconds=float(rec.get("min_seconds", 0.3)),
+            silence_timeout=float(rec.get("silence_timeout_seconds", 2.0)),
             on_max_duration=self._on_max_duration,
         )
         self._transcriber = Transcriber(
@@ -155,24 +205,21 @@ class VoiceSession:
             self._spawn(self._run_deactivate)
         # busy states (ACTIVATING, RECORDING, PROCESSING, DEACTIVATING) → ignore
 
-    def on_ptt_press(self) -> None:
-        if self._get_state() != State.READY:
-            return
-        self._cancel_idle_timer()
-        self._set_state(State.RECORDING)
-        try:
-            self._recorder.start()
-            print("[whisperflow] Recording… (release to stop)", flush=True)
-        except RuntimeError as e:
-            print(f"[whisperflow] {e}", flush=True)
-            self._set_state(State.ERROR)
-
-    def on_ptt_release(self) -> None:
-        if self._get_state() != State.RECORDING:
-            return
-        audio = self._recorder.stop()
-        self._set_state(State.PROCESSING)
-        self._spawn(self._run_pipeline, audio)
+    def on_ptt_toggle(self) -> None:
+        state = self._get_state()
+        if state == State.READY:
+            self._cancel_idle_timer()
+            self._set_state(State.RECORDING)
+            try:
+                self._recorder.start()
+                print("[whisperflow] Recording… (press again to stop)", flush=True)
+            except RuntimeError as e:
+                print(f"[whisperflow] {e}", flush=True)
+                self._set_state(State.ERROR)
+        elif state == State.RECORDING:
+            audio = self._recorder.stop()
+            self._set_state(State.PROCESSING)
+            self._spawn(self._run_pipeline, audio)
 
     def shutdown(self) -> None:
         self._cancel_idle_timer()
@@ -203,6 +250,7 @@ class VoiceSession:
             self._transcriber.load()
         except Exception as e:
             print(f"[whisperflow] Failed to load Whisper: {e}", flush=True)
+            _notify("WhisperFlow Error", f"Failed to load Whisper: {e}")
             self._set_state(State.ERROR)
             return
 
@@ -217,8 +265,9 @@ class VoiceSession:
 
         self._set_state(State.READY)
         self._reset_idle_timer()
-        ptt = self._config.get("hotkeys", {}).get("push_to_talk", "F8").upper()
-        print(f"[whisperflow] Ready. Hold {ptt} to record.", flush=True)
+        ptt = self._config.get("hotkeys", {}).get("push_to_talk", "Space").upper()
+        print(f"[whisperflow] Ready. Press {ptt} to start recording.", flush=True)
+        _notify("WhisperFlow Ready", f"Press {ptt} to start recording")
 
     def _run_deactivate(self) -> None:
         self._cancel_idle_timer()
@@ -228,8 +277,9 @@ class VoiceSession:
             self._processor.deactivate()
         gc.collect()
         self._set_state(State.IDLE)
-        act = self._config.get("hotkeys", {}).get("activation", "F7").upper()
+        act = self._config.get("hotkeys", {}).get("activation", "Shift+V").upper()
         print(f"[whisperflow] Voice mode off. Press {act} to activate.", flush=True)
+        _notify("WhisperFlow", f"Voice mode off — press {act} to reactivate")
 
     def _run_pipeline(self, audio) -> None:
         if audio is None:
@@ -258,16 +308,13 @@ class VoiceSession:
             self._reset_idle_timer()
             return
 
-        print(f"[whisperflow] Raw: {raw_text}", flush=True)
-
         # ── optional LLM cleanup ────────────────────────────────────────── #
         if self._cleanup_enabled:
-            print("[whisperflow] Cleaning up with LLM…", flush=True)
             final_text = self._processor.process(raw_text)
         else:
             final_text = raw_text
 
-        print(f"[whisperflow] Pasting: {final_text}", flush=True)
+        print(f"[whisperflow] → {final_text}", flush=True)
 
         # ── paste ───────────────────────────────────────────────────────── #
         try:
@@ -276,8 +323,10 @@ class VoiceSession:
                 restore=self._restore_clipboard,
                 restore_delay=self._restore_delay,
             )
+            _notify("WhisperFlow", final_text[:100] + ("…" if len(final_text) > 100 else ""))
         except Exception as e:
             print(f"[whisperflow] Paste failed: {e}", flush=True)
+            _notify("WhisperFlow — Paste Failed", final_text[:100])
             print(f"[whisperflow] Your text: {final_text}", flush=True)
 
         self._set_state(State.READY)
@@ -290,15 +339,15 @@ class VoiceSession:
 
 def _print_banner(config: dict) -> None:
     hk  = config.get("hotkeys", {})
-    act = hk.get("activation",   "F7").upper()
-    ptt = hk.get("push_to_talk", "F8").upper()
+    act = hk.get("activation",   "Shift+V").upper()
+    ptt = hk.get("push_to_talk", "Space").upper()
     ol  = config.get("ollama", {})
     wh  = config.get("whisper", {})
     print("=" * 52)
     print("  WhisperFlow — Local Voice to Text")
     print("=" * 52)
-    print(f"  {act}          : Toggle voice mode on / off")
-    print(f"  {ptt} (hold)  : Record; paste on release")
+    print(f"  {act:<13}: Toggle voice mode on / off")
+    print(f"  {ptt:<13}: Start / stop recording")
     print(f"  Ctrl+C       : Quit")
     print("─" * 52)
     print(f"  Whisper : {wh.get('model', 'base.en')}  |  Ollama : {ol.get('model', 'llama3.2:1b')}")
@@ -321,23 +370,27 @@ def main() -> None:
     _print_banner(config)
 
     hk_cfg = config.get("hotkeys", {})
-    activation_key = _parse_key(hk_cfg.get("activation",   "f7"))
-    ptt_key        = _parse_key(hk_cfg.get("push_to_talk", "f8"))
+    act_mods, act_main   = _parse_hotkey(hk_cfg.get("activation",   "shift+v"))
+    ptt_mods, ptt_main   = _parse_hotkey(hk_cfg.get("push_to_talk", "space"))
 
-    print(
-        f"[whisperflow] Listening. Press {hk_cfg.get('activation','F7').upper()} to activate.",
-        flush=True,
-    )
+    act_label = hk_cfg.get("activation",   "Shift+V").upper()
+    print(f"[whisperflow] Listening. Press {act_label} to activate.", flush=True)
+    _notify("WhisperFlow Running", f"Press {act_label} to activate voice mode")
+
+    _held: set = set()
 
     def on_press(key):
-        if key == activation_key:
+        if isinstance(key, kb.Key):
+            _held.add(key)
+
+        if _key_matches(key, act_main) and _mods_satisfied(act_mods, _held):
             session.on_activation_key()
-        elif key == ptt_key:
-            session.on_ptt_press()
+        elif _key_matches(key, ptt_main) and _mods_satisfied(ptt_mods, _held):
+            session.on_ptt_toggle()
 
     def on_release(key):
-        if key == ptt_key:
-            session.on_ptt_release()
+        if isinstance(key, kb.Key):
+            _held.discard(key)
 
     with kb.Listener(on_press=on_press, on_release=on_release) as listener:
         listener.join()

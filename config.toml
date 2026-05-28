@@ -1,7 +1,7 @@
 [hotkeys]
-# Key names: f1–f12, or single characters like "a"
-activation    = "f7"   # toggle voice mode on/off
-push_to_talk  = "f8"   # hold to record, release to process
+# Key names: f1–f12, single characters like "a", "space", or combos like "shift+v"
+activation    = "shift+v"   # toggle voice mode on/off
+push_to_talk  = "space"     # hold to record, release to process
 
 [whisper]
 model        = "base.en"
@@ -15,9 +15,10 @@ timeout_seconds  = 15.0
 cleanup_enabled  = true   # set false to skip LLM and paste raw Whisper output
 
 [recording]
-max_seconds = 30.0    # auto-stop recording after this many seconds
-min_seconds = 0.3     # ignore recordings shorter than this
-mic_device  = ""      # leave empty for system default; use integer index to select
+max_seconds             = 0.0   # hard time limit (0 = disabled)
+min_seconds             = 0.3   # ignore recordings shorter than this
+silence_timeout_seconds = 2.0   # auto-stop after this many seconds of silence
+mic_device              = ""    # leave empty for system default; use integer index to select
 
 [session]
 idle_unload_seconds = 300.0   # unload models after this many idle seconds (0 = never)

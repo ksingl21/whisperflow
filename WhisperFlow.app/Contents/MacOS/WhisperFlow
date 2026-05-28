@@ -1,0 +1,6 @@
+#!/bin/bash
+# Resolve project root (three levels up from MacOS/)
+PROJECT="$(cd "$(dirname "$0")/../../.." && pwd)"
+cd "$PROJECT"
+source venv/bin/activate
+exec python src/app.py
