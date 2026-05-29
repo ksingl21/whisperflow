@@ -1,10 +1,9 @@
 """
-WhisperFlow — local push-to-talk voice-to-text daemon.
+WhisperFlow — local voice-to-text daemon with menu bar indicator.
 
 Hotkeys (configurable in config.toml):
-  Shift+V      : toggle voice mode on / off
-  Space (hold) : record while held, transcribe + paste on release
-  Ctrl+C       : quit
+  Shift+V : toggle voice mode on / off
+  Space   : start / stop recording
 """
 
 import gc
@@ -17,16 +16,8 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Optional
 
+import rumps
 from pynput import keyboard as kb
-
-
-def _notify(title: str, body: str = "") -> None:
-    try:
-        script = f'display notification "{body}" with title "{title}"'
-        subprocess.run(["osascript", "-e", script], check=False, timeout=3,
-                       capture_output=True)
-    except Exception:
-        pass
 
 from audio import AudioRecorder
 from clipboard import ClipboardPaster
@@ -37,22 +28,25 @@ CONFIG_PATH = Path(__file__).parent.parent / "config.toml"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# State machine
-# ─────────────────────────────────────────────────────────────────────────────
-
-class State(Enum):
-    IDLE        = auto()
-    ACTIVATING  = auto()
-    READY       = auto()
-    RECORDING   = auto()
-    PROCESSING  = auto()
-    DEACTIVATING = auto()
-    ERROR       = auto()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _notify(title: str, body: str = "") -> None:
+    try:
+        script = f'display notification "{body}" with title "{title}"'
+        subprocess.run(["osascript", "-e", script], check=False, timeout=3,
+                       capture_output=True)
+    except Exception:
+        pass
+
+
+def _load_config(path: Path) -> dict:
+    if path.exists():
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    print(f"[whisperflow] config.toml not found at {path}, using defaults.", flush=True)
+    return {}
+
 
 _MODIFIER_GROUPS = {
     "shift": frozenset({kb.Key.shift, kb.Key.shift_l, kb.Key.shift_r}),
@@ -63,7 +57,6 @@ _MODIFIER_GROUPS = {
 
 
 def _parse_key(s: str):
-    """Convert a simple key name ('f7', 'space', 'a') to a pynput Key or KeyCode."""
     s = s.strip().lower()
     if hasattr(kb.Key, s):
         return getattr(kb.Key, s)
@@ -73,11 +66,6 @@ def _parse_key(s: str):
 
 
 def _parse_hotkey(s: str) -> tuple:
-    """Parse 'shift+v', 'space', 'f7' etc.
-
-    Returns (modifier_groups: list[frozenset], main_key).
-    Each group requires at least one of its keys to be held simultaneously.
-    """
     parts = [p.strip().lower() for p in s.split("+")]
     modifier_groups: list = []
     main_key = None
@@ -92,12 +80,10 @@ def _parse_hotkey(s: str) -> tuple:
 
 
 def _mods_satisfied(modifier_groups: list, held: set) -> bool:
-    """True when at least one key from each required modifier group is held."""
     return all(any(mod in held for mod in group) for group in modifier_groups)
 
 
 def _key_matches(pressed: object, target: object) -> bool:
-    """True if pressed matches target, case-insensitively for KeyCode chars."""
     if pressed == target:
         return True
     if (isinstance(pressed, kb.KeyCode) and isinstance(target, kb.KeyCode)
@@ -106,12 +92,39 @@ def _key_matches(pressed: object, target: object) -> bool:
     return False
 
 
-def _load_config(path: Path) -> dict:
-    if path.exists():
-        with open(path, "rb") as f:
-            return tomllib.load(f)
-    print(f"[whisperflow] config.toml not found at {path}, using defaults.", flush=True)
-    return {}
+# ─────────────────────────────────────────────────────────────────────────────
+# State machine
+# ─────────────────────────────────────────────────────────────────────────────
+
+class State(Enum):
+    IDLE         = auto()
+    ACTIVATING   = auto()
+    READY        = auto()
+    RECORDING    = auto()
+    PROCESSING   = auto()
+    DEACTIVATING = auto()
+    ERROR        = auto()
+
+
+_STATE_ICON = {
+    State.IDLE:         "🎤",
+    State.ACTIVATING:   "🎤…",
+    State.READY:        "🎤 ✅",
+    State.RECORDING:    "🔴 REC",
+    State.PROCESSING:   "🎤 ⏳",
+    State.DEACTIVATING: "🎤…",
+    State.ERROR:        "⚠️",
+}
+
+_STATE_LABEL = {
+    State.IDLE:         "Idle",
+    State.ACTIVATING:   "Loading models…",
+    State.READY:        "Ready — press Space to record",
+    State.RECORDING:    "Recording…",
+    State.PROCESSING:   "Transcribing…",
+    State.DEACTIVATING: "Deactivating…",
+    State.ERROR:        "Error",
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -119,14 +132,14 @@ def _load_config(path: Path) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class VoiceSession:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, on_state_change=None):
         self._config = config
         self._state = State.IDLE
         self._state_lock = threading.Lock()
         self._worker: Optional[threading.Thread] = None
         self._idle_timer: Optional[threading.Timer] = None
+        self._on_state_change = on_state_change  # callback(State)
 
-        # ── section references ──────────────────────────────────────────── #
         hk   = config.get("hotkeys",   {})
         wh   = config.get("whisper",   {})
         ol   = config.get("ollama",    {})
@@ -154,14 +167,12 @@ class VoiceSession:
         )
         self._paster = ClipboardPaster()
 
-        self._cleanup_enabled    = bool(ol.get("cleanup_enabled", True))
-        self._beam_size          = int(wh.get("beam_size", 1))
-        self._vad_filter         = bool(wh.get("vad_filter", True))
-        self._idle_unload_sec    = float(sess.get("idle_unload_seconds", 300.0))
-        self._restore_clipboard  = bool(cl.get("restore", True))
-        self._restore_delay      = float(cl.get("restore_delay_seconds", 1.5))
-
-    # ── state helpers ────────────────────────────────────────────────────── #
+        self._cleanup_enabled   = bool(ol.get("cleanup_enabled", True))
+        self._beam_size         = int(wh.get("beam_size", 1))
+        self._vad_filter        = bool(wh.get("vad_filter", True))
+        self._idle_unload_sec   = float(sess.get("idle_unload_seconds", 300.0))
+        self._restore_clipboard = bool(cl.get("restore", True))
+        self._restore_delay     = float(cl.get("restore_delay_seconds", 1.5))
 
     def _get_state(self) -> State:
         with self._state_lock:
@@ -170,8 +181,8 @@ class VoiceSession:
     def _set_state(self, new: State) -> None:
         with self._state_lock:
             self._state = new
-
-    # ── idle timer ───────────────────────────────────────────────────────── #
+        if self._on_state_change:
+            self._on_state_change(new)
 
     def _reset_idle_timer(self) -> None:
         self._cancel_idle_timer()
@@ -187,13 +198,8 @@ class VoiceSession:
 
     def _on_idle_timeout(self) -> None:
         if self._get_state() == State.READY:
-            print(
-                f"\n[whisperflow] Idle for {self._idle_unload_sec:.0f}s — unloading models.",
-                flush=True,
-            )
-            self._spawn(_run_fn=self._run_deactivate)
-
-    # ── public hotkey handlers ───────────────────────────────────────────── #
+            print(f"\n[whisperflow] Idle for {self._idle_unload_sec:.0f}s — unloading models.", flush=True)
+            self._spawn(self._run_deactivate)
 
     def on_activation_key(self) -> None:
         state = self._get_state()
@@ -203,7 +209,6 @@ class VoiceSession:
         elif state == State.READY:
             self._set_state(State.DEACTIVATING)
             self._spawn(self._run_deactivate)
-        # busy states (ACTIVATING, RECORDING, PROCESSING, DEACTIVATING) → ignore
 
     def on_ptt_toggle(self) -> None:
         state = self._get_state()
@@ -212,7 +217,7 @@ class VoiceSession:
             self._set_state(State.RECORDING)
             try:
                 self._recorder.start()
-                print("[whisperflow] Recording… (press again to stop)", flush=True)
+                print("[whisperflow] Recording… (press Space again to stop)", flush=True)
             except RuntimeError as e:
                 print(f"[whisperflow] {e}", flush=True)
                 self._set_state(State.ERROR)
@@ -229,20 +234,14 @@ class VoiceSession:
         if state not in (State.IDLE, State.DEACTIVATING, State.ERROR):
             self._run_deactivate()
 
-    # ── callback from AudioRecorder when max duration fires ─────────────── #
-
     def _on_max_duration(self, audio) -> None:
         if self._get_state() == State.RECORDING:
             self._set_state(State.PROCESSING)
             self._spawn(self._run_pipeline, audio)
 
-    # ── worker dispatch ──────────────────────────────────────────────────── #
-
     def _spawn(self, _run_fn, *args) -> None:
         self._worker = threading.Thread(target=_run_fn, args=args, daemon=True)
         self._worker.start()
-
-    # ── pipeline stages ──────────────────────────────────────────────────── #
 
     def _run_activate(self) -> None:
         print("[whisperflow] Activating voice mode…", flush=True)
@@ -257,10 +256,7 @@ class VoiceSession:
         if self._cleanup_enabled:
             ok = self._processor.activate()
             if not ok:
-                print(
-                    "[whisperflow] Ollama unavailable — LLM cleanup disabled for this session.",
-                    flush=True,
-                )
+                print("[whisperflow] Ollama unavailable — LLM cleanup disabled.", flush=True)
                 self._cleanup_enabled = False
 
         self._set_state(State.READY)
@@ -288,14 +284,10 @@ class VoiceSession:
             self._reset_idle_timer()
             return
 
-        # ── transcribe ──────────────────────────────────────────────────── #
         try:
             print("[whisperflow] Transcribing…", flush=True)
             raw_text = self._transcriber.transcribe(
-                audio,
-                beam_size=self._beam_size,
-                vad_filter=self._vad_filter,
-            )
+                audio, beam_size=self._beam_size, vad_filter=self._vad_filter)
         except Exception as e:
             print(f"[whisperflow] Transcription error: {e}", flush=True)
             self._set_state(State.READY)
@@ -308,58 +300,84 @@ class VoiceSession:
             self._reset_idle_timer()
             return
 
-        # ── optional LLM cleanup ────────────────────────────────────────── #
-        if self._cleanup_enabled:
-            final_text = self._processor.process(raw_text)
-        else:
-            final_text = raw_text
-
+        final_text = self._processor.process(raw_text) if self._cleanup_enabled else raw_text
         print(f"[whisperflow] → {final_text}", flush=True)
 
-        # ── paste ───────────────────────────────────────────────────────── #
         try:
-            self._paster.paste(
-                final_text,
-                restore=self._restore_clipboard,
-                restore_delay=self._restore_delay,
-            )
+            self._paster.paste(final_text, restore=self._restore_clipboard,
+                               restore_delay=self._restore_delay)
             _notify("WhisperFlow", final_text[:100] + ("…" if len(final_text) > 100 else ""))
         except Exception as e:
             print(f"[whisperflow] Paste failed: {e}", flush=True)
             _notify("WhisperFlow — Paste Failed", final_text[:100])
-            print(f"[whisperflow] Your text: {final_text}", flush=True)
 
         self._set_state(State.READY)
         self._reset_idle_timer()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Menu bar app
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WhisperFlowMenuBar(rumps.App):
+    def __init__(self, config: dict):
+        super().__init__("🎤", quit_button=None)
+        self._config = config
+        self._session: Optional[VoiceSession] = None
+
+        hk = config.get("hotkeys", {})
+        self._act_label = hk.get("activation",   "Shift+V").upper()
+        self._ptt_label = hk.get("push_to_talk", "Space").upper()
+
+        self._status_item   = rumps.MenuItem(f"Status: Idle")
+        self._activate_item = rumps.MenuItem(
+            f"Activate voice mode  ({self._act_label})",
+            callback=self._on_activate_click,
+        )
+
+        self.menu = [
+            self._status_item,
+            None,
+            self._activate_item,
+            None,
+            rumps.MenuItem("Quit WhisperFlow", callback=self._on_quit),
+        ]
+
+    def set_session(self, session: VoiceSession) -> None:
+        self._session = session
+
+    def update_state(self, state: State) -> None:
+        self.title = _STATE_ICON.get(state, "🎤")
+        self._status_item.title = f"Status: {_STATE_LABEL.get(state, str(state))}"
+        if state in (State.IDLE, State.ERROR):
+            self._activate_item.title = f"Activate voice mode  ({self._act_label})"
+        elif state == State.READY:
+            self._activate_item.title = f"Deactivate voice mode  ({self._act_label})"
+        else:
+            self._activate_item.title = f"Busy…"
+
+    def _on_activate_click(self, _) -> None:
+        if self._session:
+            self._session.on_activation_key()
+
+    def _on_quit(self, _) -> None:
+        if self._session:
+            self._session.shutdown()
+        rumps.quit_application()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _print_banner(config: dict) -> None:
-    hk  = config.get("hotkeys", {})
-    act = hk.get("activation",   "Shift+V").upper()
-    ptt = hk.get("push_to_talk", "Space").upper()
-    ol  = config.get("ollama", {})
-    wh  = config.get("whisper", {})
-    print("=" * 52)
-    print("  WhisperFlow — Local Voice to Text")
-    print("=" * 52)
-    print(f"  {act:<13}: Toggle voice mode on / off")
-    print(f"  {ptt:<13}: Start / stop recording")
-    print(f"  Ctrl+C       : Quit")
-    print("─" * 52)
-    print(f"  Whisper : {wh.get('model', 'base.en')}  |  Ollama : {ol.get('model', 'llama3.2:1b')}")
-    print(f"  Cleanup : {'on' if ol.get('cleanup_enabled', True) else 'off'}")
-    print("=" * 52, flush=True)
-
-
 def main() -> None:
     config = _load_config(CONFIG_PATH)
-    session = VoiceSession(config)
 
-    # ── signal handler ───────────────────────────────────────────────────── #
+    menu_bar = WhisperFlowMenuBar(config)
+
+    session = VoiceSession(config, on_state_change=menu_bar.update_state)
+    menu_bar.set_session(session)
+
     def _handle_sigint(sig, frame):
         print("\n[whisperflow] Shutting down…", flush=True)
         session.shutdown()
@@ -367,13 +385,11 @@ def main() -> None:
 
     signal.signal(signal.SIGINT, _handle_sigint)
 
-    _print_banner(config)
-
     hk_cfg = config.get("hotkeys", {})
-    act_mods, act_main   = _parse_hotkey(hk_cfg.get("activation",   "shift+v"))
-    ptt_mods, ptt_main   = _parse_hotkey(hk_cfg.get("push_to_talk", "space"))
+    act_mods, act_main = _parse_hotkey(hk_cfg.get("activation",   "shift+v"))
+    ptt_mods, ptt_main = _parse_hotkey(hk_cfg.get("push_to_talk", "space"))
+    act_label = hk_cfg.get("activation", "Shift+V").upper()
 
-    act_label = hk_cfg.get("activation",   "Shift+V").upper()
     print(f"[whisperflow] Listening. Press {act_label} to activate.", flush=True)
     _notify("WhisperFlow Running", f"Press {act_label} to activate voice mode")
 
@@ -382,7 +398,6 @@ def main() -> None:
     def on_press(key):
         if isinstance(key, kb.Key):
             _held.add(key)
-
         if _key_matches(key, act_main) and _mods_satisfied(act_mods, _held):
             session.on_activation_key()
         elif _key_matches(key, ptt_main) and _mods_satisfied(ptt_mods, _held):
@@ -392,8 +407,12 @@ def main() -> None:
         if isinstance(key, kb.Key):
             _held.discard(key)
 
-    with kb.Listener(on_press=on_press, on_release=on_release) as listener:
-        listener.join()
+    # Run keyboard listener in a background thread (rumps owns the main thread)
+    listener = kb.Listener(on_press=on_press, on_release=on_release)
+    listener.daemon = True
+    listener.start()
+
+    menu_bar.run()
 
 
 if __name__ == "__main__":
